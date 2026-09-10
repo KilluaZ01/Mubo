@@ -1,0 +1,22 @@
+[Unit]
+Description=Mubo Discord Music Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/mubo
+EnvironmentFile=/home/ubuntu/mubo/.env
+ExecStart=/home/ubuntu/mubo/venv/bin/python main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Crash protection — if it restarts more than 5 times in 60 seconds, stop trying
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
