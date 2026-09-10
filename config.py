@@ -7,14 +7,13 @@ failing silently mid-operation.
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env file if it exists (no-op in production where env is set directly)
 load_dotenv()
 
 
 def _require(key: str) -> str:
-    """Retrieve a required environment variable or raise a helpful error."""
     value = os.getenv(key)
     if not value:
         raise EnvironmentError(
@@ -25,7 +24,6 @@ def _require(key: str) -> str:
 
 
 def _optional_int(key: str, default: int) -> int:
-    """Retrieve an optional integer environment variable with a fallback."""
     raw = os.getenv(key)
     if raw is None:
         return default
@@ -41,27 +39,33 @@ def _optional_str(key: str, default: str | None = None) -> str | None:
     return os.getenv(key) or default
 
 
-# ── Required ──────────────────────────────────────────────────────────────────
+# ── Required ───────────────────────────────────────────────────────────────────
 
 DISCORD_TOKEN: str = _require("DISCORD_TOKEN")
 
-# ── Optional ──────────────────────────────────────────────────────────────────
+# ── Optional ───────────────────────────────────────────────────────────────────
 
-# If set, slash commands sync instantly to this guild (dev workflow).
-# Leave unset for global sync (production).
 DEV_GUILD_ID: int | None = (
     int(os.getenv("DEV_GUILD_ID")) if os.getenv("DEV_GUILD_ID") else None
 )
 
-# Seconds of silence before the bot auto-disconnects from a voice channel.
 IDLE_TIMEOUT: int = _optional_int("IDLE_TIMEOUT", default=300)
 
-# Volume applied when a new MusicPlayer is created (0–100).
 DEFAULT_VOLUME: int = _optional_int("DEFAULT_VOLUME", default=50)
 if not (0 <= DEFAULT_VOLUME <= 100):
     raise EnvironmentError("DEFAULT_VOLUME must be between 0 and 100.")
 
-# ── FFmpeg ─────────────────────────────────────────────────────────────────────
-
-# Override if FFmpeg is not on PATH (e.g. Windows users who extracted manually).
 FFMPEG_EXECUTABLE: str = _optional_str("FFMPEG_EXECUTABLE", default="ffmpeg")
+
+# ── GIF / media ────────────────────────────────────────────────────────────────
+
+# Local directory of .gif files to display on Now Playing embeds.
+# Put any .gif files you like in this folder.
+# Leave unset (or folder empty) to skip local GIFs.
+MUSIC_GIF_DIR: Path = Path(
+    _optional_str("MUSIC_GIF_DIR", default="assets/gifs") or "assets/gifs"
+)
+
+# Remote GIF URL fallback — used when MUSIC_GIF_DIR has no files.
+# Leave unset to show no GIF at all.
+MUSIC_GIF_URL: str | None = _optional_str("MUSIC_GIF_URL", default=None)

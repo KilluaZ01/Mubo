@@ -1,1 +1,56 @@
-/.env
+# Environment — NEVER commit secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.manifest
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Whisper model cache (large, re-downloaded automatically)
+~/.cache/huggingface/
+model_cache/
+
+# Test artifacts
+test_search.py
+.pytest_cache/
+
+# Assets — GIFs can be large, exclude if not needed in repo
+# Comment this out if you want to include your GIFs
+# assets/gifs/*.gif

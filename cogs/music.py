@@ -2,14 +2,6 @@
 cogs/music.py
 -------------
 All Discord slash commands for the music bot.
-
-Responsibilities:
-  - Define and register slash commands
-  - Validate user context (in a voice channel? correct permissions?)
-  - Delegate work to MusicPlayer and MusicSource
-  - Send Discord embeds
-
-Does NOT contain queue logic, streaming, or yt-dlp calls.
 """
 
 from __future__ import annotations
@@ -31,35 +23,132 @@ from utils import embeds
 log = logging.getLogger(__name__)
 
 
+# ── Now Playing interactive view ───────────────────────────────────────────────
+
+
+class NowPlayingView(discord.ui.View):
+    """Interactive controls attached to the automatic Now Playing message."""
+
+    def __init__(
+        self,
+        music_cog: "Music",
+        guild_id: int,
+        gif_name: str | None = None,
+    ) -> None:
+        super().__init__(timeout=900)
+        self.music_cog = music_cog
+        self.guild_id = guild_id
+        self.gif_name = gif_name
+
+    def _player(self) -> MusicPlayer | None:
+        return self.music_cog.get_player(self.guild_id)
+
+    async def _refresh_panel(self, interaction: discord.Interaction) -> None:
+        """Re-render the Now Playing embed in-place after a state change."""
+        player = self._player()
+        if player is None or player.current is None:
+            # Playback ended — update embed to reflect stopped state
+            await interaction.response.edit_message(
+                embed=embeds.success("Playback Ended", "The queue is now empty."),
+                view=None,
+                attachments=[],
+            )
+            self.stop()
+            return
+        await interaction.response.edit_message(
+            embed=embeds.now_playing(
+                player.current,
+                paused=player.is_paused,
+                gif_name=self.gif_name,
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.primary)
+    async def pause_resume(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        player = self._player()
+        if player is None or player.current is None:
+            await interaction.response.send_message(
+                "Nothing is playing.", ephemeral=True
+            )
+            return
+        if player.is_paused:
+            player.resume()
+        elif player.is_playing:
+            player.pause()
+        await self._refresh_panel(interaction)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
+    async def skip(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        player = self._player()
+        if player is None or player.current is None:
+            await interaction.response.send_message(
+                "Nothing is playing.", ephemeral=True
+            )
+            return
+        skipped = await player.skip()
+        await interaction.response.send_message(
+            f"Skipped **{skipped.short_title}**." if skipped else "Skipped.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.secondary)
+    async def show_queue(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        player = self._player()
+        current = player.current if player else None
+        upcoming = player.queue_snapshot() if player else []
+        await interaction.response.send_message(
+            embed=embeds.queue_list(current, upcoming), ephemeral=True
+        )
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger)
+    async def stop_playback(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self._player() is None:
+            await interaction.response.send_message(
+                "Nothing is playing.", ephemeral=True
+            )
+            return
+        await self.music_cog.destroy_player(self.guild_id)
+        self.stop()
+        await interaction.response.edit_message(
+            embed=embeds.success("Stopped", "Playback stopped and queue cleared."),
+            view=None,
+            attachments=[],
+        )
+
+
 # ── Voice connection helpers ───────────────────────────────────────────────────
 
 
 async def _get_user_voice_channel(
     interaction: discord.Interaction,
 ) -> discord.VoiceChannel | None:
-    """Return the user's current voice channel, or send an error and return None."""
     member = interaction.user
     if not isinstance(member, discord.Member) or member.voice is None:
         await interaction.response.send_message(
             embed=embeds.error(
-                "Not in a Voice Channel",
-                "You need to join a voice channel first.",
+                "Not in a Voice Channel", "You need to join a voice channel first."
             ),
             ephemeral=True,
         )
         return None
-
     channel = member.voice.channel
     if not isinstance(channel, discord.VoiceChannel):
         await interaction.response.send_message(
             embed=embeds.error(
-                "Unsupported Channel Type",
-                "Please join a standard voice channel (not a Stage channel).",
+                "Unsupported Channel Type", "Please join a standard voice channel."
             ),
             ephemeral=True,
         )
         return None
-
     return channel
 
 
@@ -67,26 +156,22 @@ async def _check_bot_permissions(
     interaction: discord.Interaction,
     channel: discord.VoiceChannel,
 ) -> bool:
-    """Verify Connect + Speak permissions. Sends error and returns False if missing."""
     me = interaction.guild.me
     perms = channel.permissions_for(me)
-
     missing: list[str] = []
     if not perms.connect:
         missing.append("`Connect`")
     if not perms.speak:
         missing.append("`Speak`")
-
     if missing:
         await interaction.response.send_message(
             embed=embeds.error(
                 "Missing Permissions",
-                f"I need {' and '.join(missing)} permission(s) in **{channel.name}**.",
+                f"I need {' and '.join(missing)} in **{channel.name}**.",
             ),
             ephemeral=True,
         )
         return False
-
     return True
 
 
@@ -94,9 +179,7 @@ async def _join_channel(
     interaction: discord.Interaction,
     channel: discord.VoiceChannel,
 ) -> discord.VoiceClient | None:
-    """Connect to or move to a voice channel. Returns VoiceClient or None on failure."""
     guild_vc: discord.VoiceClient | None = interaction.guild.voice_client  # type: ignore[assignment]
-
     try:
         if guild_vc is None:
             voice_client = await channel.connect(timeout=10.0, reconnect=True)
@@ -107,7 +190,6 @@ async def _join_channel(
             await guild_vc.move_to(channel)
             log.info("Moved to #%s in '%s'", channel.name, interaction.guild.name)
             voice_client = guild_vc
-
     except discord.ClientException as exc:
         log.error("Voice connection error: %s", exc)
         if not interaction.response.is_done():
@@ -118,19 +200,16 @@ async def _join_channel(
                 ephemeral=True,
             )
         return None
-
     except TimeoutError:
         log.error("Voice connection timed out in '%s'", interaction.guild.name)
         if not interaction.response.is_done():
             await interaction.response.send_message(
                 embed=embeds.error(
-                    "Connection Timed Out",
-                    "Took too long to join. Check my permissions.",
+                    "Connection Timed Out", "Check my permissions and try again."
                 ),
                 ephemeral=True,
             )
         return None
-
     return voice_client
 
 
@@ -138,17 +217,15 @@ async def _join_channel(
 
 
 class Music(commands.Cog):
-    """Music playback slash commands."""
+    """Music playback commands."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        # One MusicPlayer per guild, keyed by guild ID
         self._players: dict[int, MusicPlayer] = {}
 
     # ── Player management ─────────────────────────────────────────────────────
 
     def get_player(self, guild_id: int) -> MusicPlayer | None:
-        """Return the active MusicPlayer for a guild, or None."""
         return self._players.get(guild_id)
 
     async def get_or_create_player(
@@ -156,21 +233,22 @@ class Music(commands.Cog):
         interaction: discord.Interaction,
         voice_client: discord.VoiceClient,
     ) -> MusicPlayer:
-        """
-        Return an existing MusicPlayer for the guild, or create a new one.
-        Sets up the on_track_start callback to send Now Playing embeds.
-        """
         guild_id = interaction.guild_id
         player = self._players.get(guild_id)
 
         if player is None or not player.voice_client.is_connected():
-            # Capture text_channel for the callback closure
             text_channel = interaction.channel
 
             def on_track_start(track: Track) -> None:
-                """Called by MusicPlayer when a new track starts."""
+                current_player = self._players.get(guild_id)
+                if current_player is None:
+                    return
+                gif_path = embeds.random_music_gif()
+                gif_name = gif_path.name if gif_path else None
                 asyncio.get_event_loop().create_task(
-                    text_channel.send(embed=embeds.now_playing(track))
+                    self._send_now_playing(
+                        text_channel, guild_id, track, gif_path, gif_name
+                    )
                 )
 
             player = MusicPlayer(
@@ -183,13 +261,27 @@ class Music(commands.Cog):
 
         return player
 
+    async def _send_now_playing(
+        self,
+        channel: discord.abc.Messageable,
+        guild_id: int,
+        track: Track,
+        gif_path,
+        gif_name: str | None,
+    ) -> None:
+        file = discord.File(str(gif_path), filename=gif_name) if gif_path else None
+        await channel.send(
+            embed=embeds.now_playing(track, gif_name=gif_name),
+            view=NowPlayingView(self, guild_id, gif_name),
+            file=file,
+        )
+
     async def destroy_player(self, guild_id: int) -> None:
-        """Destroy and remove the MusicPlayer for a guild."""
         player = self._players.pop(guild_id, None)
         if player:
             await player.destroy()
 
-    # ── Event listeners ───────────────────────────────────────────────────────
+    # ── Events ────────────────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -198,41 +290,44 @@ class Music(commands.Cog):
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
-        """
-        Clean up the player when the bot is disconnected from voice externally
-        (e.g. kicked from the channel by an admin).
-        """
         if member.id != self.bot.user.id:
             return
-        # Bot left a channel
         if before.channel is not None and after.channel is None:
             guild_id = member.guild.id
             player = self._players.pop(guild_id, None)
             if player:
                 player._playback_task.cancel()
-                log.info(
-                    "Player cleaned up after external disconnect in guild %d", guild_id
-                )
+            log.info("Cleaned up after external disconnect in guild %d", guild_id)
+
+    # ── Autocomplete ──────────────────────────────────────────────────────────
+
+    async def _play_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete callback — must be an instance method on the cog."""
+        if not current.strip():
+            return []
+        suggestions = await MusicSource.suggestions(current)
+        return [
+            app_commands.Choice(name=name[:100], value=value[:100])
+            for name, value in suggestions
+        ]
 
     # ── /play ─────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="play", description="Play a song by name or URL.")
     @app_commands.describe(query="Song name or URL to play")
     async def play(self, interaction: discord.Interaction, query: str) -> None:
-        """Search for a song and add it to the queue."""
-
-        # 1. Validate voice channel
         channel = await _get_user_voice_channel(interaction)
         if channel is None:
             return
-
         if not await _check_bot_permissions(interaction, channel):
             return
 
-        # 2. Defer immediately — search can take a few seconds
         await interaction.response.defer()
 
-        # 3. Search / extract track metadata
         try:
             track = await MusicSource.from_query(
                 query,
@@ -244,8 +339,7 @@ class Music(commands.Cog):
             await interaction.followup.send(
                 embed=embeds.error(
                     "Could Not Find Song",
-                    "That video is unavailable, private, or geo-restricted.\n"
-                    "Try a different search or URL.",
+                    "That video is unavailable, private, or geo-restricted.",
                 )
             )
             return
@@ -256,38 +350,31 @@ class Music(commands.Cog):
             log.error("Unexpected search error for %r: %s", query, exc, exc_info=True)
             await interaction.followup.send(
                 embed=embeds.error(
-                    "Search Failed",
-                    "Something went wrong while searching. Please try again.",
+                    "Search Failed", "Something went wrong. Please try again."
                 )
             )
             return
 
-        # 4. Connect to voice (or reuse existing connection)
         voice_client = await _join_channel(interaction, channel)
         if voice_client is None:
             return
 
-        # 5. Get or create the guild's MusicPlayer
         player = await self.get_or_create_player(interaction, voice_client)
-
-        # 6. Enqueue the track
         position = await player.enqueue(track)
 
-        # 7. Respond — if something is already playing, show "Added to Queue"
-        #    If the queue was empty, the playback loop will pick it up and
-        #    fire the "Now Playing" embed automatically via on_track_start.
         if player.is_playing or player.is_paused:
             await interaction.followup.send(
                 embed=embeds.added_to_queue(track, position)
             )
         else:
-            # Playback loop will send Now Playing embed when it starts
             await interaction.followup.send(
                 embed=embeds.info(
-                    "Loading…",
-                    f"Preparing to play **{track.short_title}**.",
+                    "Loading…", f"Preparing to play **{track.short_title}**."
                 )
             )
+
+    # Wire up autocomplete after the method exists
+    play.autocomplete("query")(_play_autocomplete)
 
     # ── /join ─────────────────────────────────────────────────────────────────
 
@@ -298,11 +385,9 @@ class Music(commands.Cog):
             return
         if not await _check_bot_permissions(interaction, channel):
             return
-
         voice_client = await _join_channel(interaction, channel)
         if voice_client is None:
             return
-
         if not interaction.response.is_done():
             await interaction.response.send_message(
                 embed=embeds.joined_channel(channel.name)
@@ -319,21 +404,16 @@ class Music(commands.Cog):
     @app_commands.command(name="leave", description="Stop playback and disconnect.")
     async def leave(self, interaction: discord.Interaction) -> None:
         guild_vc: discord.VoiceClient | None = interaction.guild.voice_client  # type: ignore[assignment]
-
         if guild_vc is None or not guild_vc.is_connected():
             await interaction.response.send_message(
                 embed=embeds.error("Not Connected", "I'm not in a voice channel."),
                 ephemeral=True,
             )
             return
-
         channel_name = guild_vc.channel.name
         await self.destroy_player(interaction.guild_id)
-
-        # destroy() disconnects, but if no player existed, disconnect manually
         if guild_vc.is_connected():
             await guild_vc.disconnect(force=False)
-
         await interaction.response.send_message(embed=embeds.left_channel(channel_name))
 
     # ── /pause ────────────────────────────────────────────────────────────────
@@ -341,14 +421,12 @@ class Music(commands.Cog):
     @app_commands.command(name="pause", description="Pause the current track.")
     async def pause(self, interaction: discord.Interaction) -> None:
         player = self.get_player(interaction.guild_id)
-
         if player is None or not (player.is_playing or player.is_paused):
             await interaction.response.send_message(
                 embed=embeds.error("Nothing Playing", "There's nothing to pause."),
                 ephemeral=True,
             )
             return
-
         if player.pause():
             await interaction.response.send_message(
                 embed=embeds.success(
@@ -366,14 +444,12 @@ class Music(commands.Cog):
     @app_commands.command(name="resume", description="Resume paused playback.")
     async def resume(self, interaction: discord.Interaction) -> None:
         player = self.get_player(interaction.guild_id)
-
         if player is None:
             await interaction.response.send_message(
                 embed=embeds.error("Nothing Playing", "There's nothing to resume."),
                 ephemeral=True,
             )
             return
-
         if player.resume():
             await interaction.response.send_message(
                 embed=embeds.success(
@@ -382,7 +458,7 @@ class Music(commands.Cog):
             )
         else:
             await interaction.response.send_message(
-                embed=embeds.warning("Not Paused", "Playback isn't paused right now."),
+                embed=embeds.warning("Not Paused", "Playback isn't paused."),
                 ephemeral=True,
             )
 
@@ -391,14 +467,12 @@ class Music(commands.Cog):
     @app_commands.command(name="skip", description="Skip the current track.")
     async def skip(self, interaction: discord.Interaction) -> None:
         player = self.get_player(interaction.guild_id)
-
         if player is None or player.current is None:
             await interaction.response.send_message(
                 embed=embeds.error("Nothing Playing", "There's nothing to skip."),
                 ephemeral=True,
             )
             return
-
         skipped = await player.skip()
         await interaction.response.send_message(
             embed=embeds.success(
@@ -414,14 +488,12 @@ class Music(commands.Cog):
     )
     async def stop(self, interaction: discord.Interaction) -> None:
         player = self.get_player(interaction.guild_id)
-
         if player is None:
             await interaction.response.send_message(
                 embed=embeds.error("Nothing Playing", "I'm not playing anything."),
                 ephemeral=True,
             )
             return
-
         await self.destroy_player(interaction.guild_id)
         await interaction.response.send_message(
             embed=embeds.success("Stopped", "Playback stopped and queue cleared.")
@@ -433,10 +505,8 @@ class Music(commands.Cog):
     @app_commands.describe(page="Page number for long queues")
     async def queue(self, interaction: discord.Interaction, page: int = 1) -> None:
         player = self.get_player(interaction.guild_id)
-
         current = player.current if player else None
         upcoming = player.queue_snapshot() if player else []
-
         await interaction.response.send_message(
             embed=embeds.queue_list(current, upcoming, page=page)
         )
@@ -448,14 +518,12 @@ class Music(commands.Cog):
     )
     async def nowplaying(self, interaction: discord.Interaction) -> None:
         player = self.get_player(interaction.guild_id)
-
         if player is None or player.current is None:
             await interaction.response.send_message(
                 embed=embeds.error("Nothing Playing", "No song is currently playing."),
                 ephemeral=True,
             )
             return
-
         await interaction.response.send_message(
             embed=embeds.now_playing_status(player.current)
         )
@@ -473,17 +541,13 @@ class Music(commands.Cog):
                 ephemeral=True,
             )
             return
-
         player = self.get_player(interaction.guild_id)
         if player is None:
             await interaction.response.send_message(
-                embed=embeds.error(
-                    "Nothing Playing", "No active player in this server."
-                ),
+                embed=embeds.error("Nothing Playing", "No active player."),
                 ephemeral=True,
             )
             return
-
         player.volume = level
         await interaction.response.send_message(
             embed=embeds.success("Volume Updated", f"Volume set to **{level}%**.")
@@ -494,16 +558,12 @@ class Music(commands.Cog):
     @app_commands.command(name="shuffle", description="Shuffle the upcoming queue.")
     async def shuffle(self, interaction: discord.Interaction) -> None:
         player = self.get_player(interaction.guild_id)
-
-        if player is None or player.queue_snapshot() == []:
+        if player is None or not player.queue_snapshot():
             await interaction.response.send_message(
-                embed=embeds.error(
-                    "Empty Queue", "There are no upcoming tracks to shuffle."
-                ),
+                embed=embeds.error("Empty Queue", "No upcoming tracks to shuffle."),
                 ephemeral=True,
             )
             return
-
         if player.shuffle():
             await interaction.response.send_message(
                 embed=embeds.success("Shuffled", "The queue has been shuffled. 🔀")
@@ -523,25 +583,20 @@ class Music(commands.Cog):
     )
     async def clear(self, interaction: discord.Interaction) -> None:
         player = self.get_player(interaction.guild_id)
-
         if player is None:
             await interaction.response.send_message(
-                embed=embeds.error(
-                    "Nothing Playing", "No active player in this server."
-                ),
+                embed=embeds.error("Nothing Playing", "No active player."),
                 ephemeral=True,
             )
             return
-
         count = player.clear_queue()
         await interaction.response.send_message(
             embed=embeds.success(
-                "Queue Cleared",
-                f"Removed **{count}** track(s) from the queue.",
+                "Queue Cleared", f"Removed **{count}** track(s) from the queue."
             )
         )
 
-    # ── /ping (dev utility) ───────────────────────────────────────────────────
+    # ── /ping ─────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="ping", description="Check bot latency.")
     async def ping(self, interaction: discord.Interaction) -> None:

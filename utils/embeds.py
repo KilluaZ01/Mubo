@@ -11,6 +11,10 @@ in one place — change them here and the whole bot updates.
 from __future__ import annotations
 
 import discord
+import random
+from pathlib import Path
+
+import config
 from models.track import Track
 
 # ── Colour palette ─────────────────────────────────────────────────────────────
@@ -22,6 +26,14 @@ class Colour:
     INFO = discord.Colour.from_str("#5865F2")  # blurple
     WARNING = discord.Colour.from_str("#FEE75C")  # yellow
     MUSIC = discord.Colour.from_str("#1DB954")  # Spotify green
+
+
+def random_music_gif() -> Path | None:
+    """Return one local music GIF, or None when Assets has no GIFs."""
+    if not config.MUSIC_GIF_DIR.is_dir():
+        return None
+    gifs = sorted(config.MUSIC_GIF_DIR.glob("*.gif"))
+    return random.choice(gifs) if gifs else None
 
 
 # ── Generic builders ───────────────────────────────────────────────────────────
@@ -79,7 +91,12 @@ def left_channel(channel_name: str) -> discord.Embed:
 # ── Music embeds ───────────────────────────────────────────────────────────────
 
 
-def now_playing(track: Track) -> discord.Embed:
+def now_playing(
+    track: Track,
+    *,
+    paused: bool = False,
+    gif_name: str | None = None,
+) -> discord.Embed:
     """Rich embed shown when a track begins playing."""
     embed = discord.Embed(
         title="🎵  Now Playing",
@@ -94,6 +111,9 @@ def now_playing(track: Track) -> discord.Embed:
     )
     embed.add_field(name="Duration", value=track.duration_str, inline=True)
     embed.add_field(
+        name="Status", value="⏸️ Paused" if paused else "▶️ Playing", inline=True
+    )
+    embed.add_field(
         name="Requested by",
         value=track.requester_name,
         inline=True,
@@ -101,6 +121,11 @@ def now_playing(track: Track) -> discord.Embed:
 
     if track.thumbnail:
         embed.set_thumbnail(url=track.thumbnail)
+
+    if gif_name:
+        embed.set_image(url=f"attachment://{gif_name}")
+    elif config.MUSIC_GIF_URL:
+        embed.set_image(url=config.MUSIC_GIF_URL)
 
     embed.set_footer(text=f"🔗  {track.webpage_url}")
     return embed

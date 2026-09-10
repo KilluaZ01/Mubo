@@ -21,8 +21,11 @@ the Discord event loop is never blocked.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import time
+import urllib.request
 from typing import Any
 
 import yt_dlp
@@ -56,6 +59,15 @@ _YDL_SEARCH_OPTS: dict[str, Any] = {
 # Options used when resolving a fresh stream URL just before playback.
 _YDL_STREAM_OPTS: dict[str, Any] = {
     **_YDL_BASE_OPTS,
+}
+
+_YDL_AUTOCOMPLETE_OPTS: dict[str, Any] = {
+    "quiet": True,
+    "no_warnings": True,
+    "default_search": "ytsearch",
+    "noplaylist": True,
+    "extract_flat": True,
+    "skip_download": True,
 }
 
 # URL pattern — if the user's input matches this, treat it as a URL not a query.
@@ -122,11 +134,91 @@ def _extract_sync(query_or_url: str, opts: dict[str, Any]) -> dict[str, Any]:
         return info
 
 
+def _youtube_video_suggestions_sync(query: str) -> list[tuple[str, str]]:
+    payload = {
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20260101.01.00",
+            }
+        },
+        "query": query,
+    }
+    request = urllib.request.Request(
+        "https://www.youtube.com/youtubei/v1/search?prettyPrint=false",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=1.5) as response:
+        data = json.loads(response.read().decode("utf-8"))
+
+    results: list[tuple[str, str]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            renderer = value.get("videoRenderer")
+            if renderer:
+                title = renderer.get("title", {}).get("runs", [{}])[0].get("text")
+                if title:
+                    results.append((title, title))
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(data)
+    return results[:5]
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
 class MusicSource:
     """Namespace for async yt-dlp helpers."""
+
+    _suggestion_cache: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+    _suggestion_cache_ttl = 60.0
+
+    @staticmethod
+    async def suggestions(query: str) -> list[tuple[str, str]]:
+        """Return lightweight song-title choices for Discord autocomplete."""
+        normalized_query = query.strip().lower()
+        if not normalized_query:
+            return []
+
+        now = time.monotonic()
+        cached = MusicSource._suggestion_cache.get(normalized_query)
+        if cached and now - cached[0] < MusicSource._suggestion_cache_ttl:
+            return cached[1]
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _youtube_video_suggestions_sync,
+                    normalized_query,
+                ),
+                timeout=1.8,
+            )
+        except asyncio.TimeoutError:
+            log.debug("Autocomplete search timed out for %r", normalized_query)
+            return []
+        except Exception as exc:
+            log.debug("Autocomplete search failed for %r: %s", normalized_query, exc)
+            return []
+
+        results = results[:25]
+        MusicSource._suggestion_cache[normalized_query] = (now, results)
+        if len(MusicSource._suggestion_cache) > 100:
+            oldest_query = min(
+                MusicSource._suggestion_cache,
+                key=lambda key: MusicSource._suggestion_cache[key][0],
+            )
+            del MusicSource._suggestion_cache[oldest_query]
+        return results
 
     @staticmethod
     async def search(
